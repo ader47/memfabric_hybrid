@@ -74,41 +74,29 @@ if (BUILD_HYBM_COPY_EXTEND AND XPU_TYPE STREQUAL "NPU")
         set(HYBM_COPY_EXTEND_ASCEND_HOME "")
     endif ()
 
-    set(HYBM_COPY_EXTEND_ASCENDC_CMAKE "")
-    foreach(_ascendc_dir
-            "${HYBM_COPY_EXTEND_ASCEND_HOME}/tools/tikcpp/ascendc_kernel_cmake"
-            "${HYBM_COPY_EXTEND_ASCEND_HOME}/compiler/tikcpp/ascendc_kernel_cmake"
-            "${HYBM_COPY_EXTEND_ASCEND_HOME}/ascendc_devkit/tikcpp/samples/cmake")
-        if (EXISTS "${_ascendc_dir}/ascendc.cmake")
-            set(HYBM_COPY_EXTEND_ASCENDC_CMAKE "${_ascendc_dir}/ascendc.cmake")
-            break()
-        endif ()
-    endforeach()
+    set(HYBM_COPY_EXTEND_CCE_ARCH "dav-c220" CACHE STRING "CCE aicore arch for HYBM copy extend")
+    set(HYBM_COPY_EXTEND_OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/libmf_hybm_copy_extend.so")
+    find_program(HYBM_COPY_EXTEND_BISHENG
+            NAMES bisheng
+            HINTS
+                "${HYBM_COPY_EXTEND_ASCEND_HOME}/compiler/ccec_compiler/bin"
+                "${HYBM_COPY_EXTEND_ASCEND_HOME}/aarch64-linux/ccec_compiler/bin"
+                "${HYBM_COPY_EXTEND_ASCEND_HOME}/x86_64-linux/ccec_compiler/bin")
 
-    if (HYBM_COPY_EXTEND_ASCENDC_CMAKE)
-        set(ASCEND_CANN_PACKAGE_PATH "${HYBM_COPY_EXTEND_ASCEND_HOME}")
-        set(RUN_MODE "npu" CACHE STRING "cpu/sim/npu")
-        set(SOC_VERSION "Ascend910B3" CACHE STRING "system on chip type")
-        include("${HYBM_COPY_EXTEND_ASCENDC_CMAKE}")
-
-        ascendc_library(hybm_copy_extend_shared SHARED
-                ${PROJECT_HYBM_SRC_BASE}/csrc/copy_extend/hybm_copy_kernel.cpp)
-        set_target_properties(hybm_copy_extend_shared PROPERTIES
-            OUTPUT_NAME "mf_hybm_copy_extend"
-            BUILD_RPATH "\$ORIGIN"
-            INSTALL_RPATH "\$ORIGIN"
-            INSTALL_RPATH_USE_LINK_PATH TRUE
-        )
-
-        set(HYBM_COPY_EXTEND_INCLUDE_DIRS
-                ${PROJECT_HYBM_SRC_BASE}/csrc/copy_extend
-                ${HYBM_COPY_EXTEND_ASCEND_HOME}/include
-                ${HYBM_COPY_EXTEND_ASCEND_HOME}/include/aclnn
-                ${HYBM_COPY_EXTEND_ASCEND_HOME}/asc/include)
-        ascendc_include_directories(hybm_copy_extend_shared PRIVATE ${HYBM_COPY_EXTEND_INCLUDE_DIRS})
+    if (HYBM_COPY_EXTEND_BISHENG)
+        add_custom_command(
+                OUTPUT "${HYBM_COPY_EXTEND_OUTPUT}"
+                COMMAND "${HYBM_COPY_EXTEND_BISHENG}" -x asc
+                        "${PROJECT_HYBM_SRC_BASE}/csrc/copy_extend/hybm_copy_kernel.cpp"
+                        -shared -g -o "${HYBM_COPY_EXTEND_OUTPUT}"
+                        "--cce-aicore-arch=${HYBM_COPY_EXTEND_CCE_ARCH}"
+                DEPENDS "${PROJECT_HYBM_SRC_BASE}/csrc/copy_extend/hybm_copy_kernel.cpp"
+                COMMENT "Building libmf_hybm_copy_extend.so by bisheng"
+                VERBATIM)
+        add_custom_target(hybm_copy_extend_shared ALL DEPENDS "${HYBM_COPY_EXTEND_OUTPUT}")
     else ()
         message(WARNING
-                "BUILD_HYBM_COPY_EXTEND is ON, but AscendC cmake was not found under "
+                "BUILD_HYBM_COPY_EXTEND is ON, but bisheng was not found under "
                 "ASCEND_HOME_PATH='${HYBM_COPY_EXTEND_ASCEND_HOME}'. "
                 "Skip building libmf_hybm_copy_extend.so.")
     endif ()
@@ -128,9 +116,9 @@ install(
         PERMISSIONS OWNER_READ OWNER_WRITE GROUP_READ WORLD_READ
 )
 
-if (TARGET hybm_copy_extend_shared)
+if (BUILD_HYBM_COPY_EXTEND AND XPU_TYPE STREQUAL "NPU" AND HYBM_COPY_EXTEND_BISHENG)
     install(
-            TARGETS hybm_copy_extend_shared
+            FILES "${HYBM_COPY_EXTEND_OUTPUT}"
             DESTINATION ${TARGET_INSTALL_DIR}/hybm/lib64
             PERMISSIONS OWNER_READ OWNER_WRITE GROUP_READ WORLD_READ
     )
