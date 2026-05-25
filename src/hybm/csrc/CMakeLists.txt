@@ -30,6 +30,7 @@ include_directories(
 )
 
 set(HYBM_PUBLIC_INCLUDE_DIR "${PROJECT_HYBM_SRC_BASE}/include")
+option(BUILD_HYBM_COPY_EXTEND "Build HYBM copy extend kernel library" ON)
 
 ## add files into src variables
 file(GLOB_RECURSE HYBMM_SRC_FILES
@@ -64,6 +65,55 @@ set_target_properties(hybmm_shared PROPERTIES
 target_link_libraries(hybmm_shared PUBLIC pthread dl)
 target_include_directories(hybmm_shared INTERFACE ${HYBM_PUBLIC_INCLUDE_DIR})
 
+if (BUILD_HYBM_COPY_EXTEND AND XPU_TYPE STREQUAL "NPU")
+    if (DEFINED ASCEND_HOME_PATH)
+        set(HYBM_COPY_EXTEND_ASCEND_HOME "${ASCEND_HOME_PATH}")
+    elseif (DEFINED ENV{ASCEND_HOME_PATH})
+        set(HYBM_COPY_EXTEND_ASCEND_HOME "$ENV{ASCEND_HOME_PATH}")
+    else ()
+        set(HYBM_COPY_EXTEND_ASCEND_HOME "")
+    endif ()
+
+    set(HYBM_COPY_EXTEND_ASCENDC_CMAKE "")
+    foreach(_ascendc_dir
+            "${HYBM_COPY_EXTEND_ASCEND_HOME}/tools/tikcpp/ascendc_kernel_cmake"
+            "${HYBM_COPY_EXTEND_ASCEND_HOME}/compiler/tikcpp/ascendc_kernel_cmake"
+            "${HYBM_COPY_EXTEND_ASCEND_HOME}/ascendc_devkit/tikcpp/samples/cmake")
+        if (EXISTS "${_ascendc_dir}/ascendc.cmake")
+            set(HYBM_COPY_EXTEND_ASCENDC_CMAKE "${_ascendc_dir}/ascendc.cmake")
+            break()
+        endif ()
+    endforeach()
+
+    if (HYBM_COPY_EXTEND_ASCENDC_CMAKE)
+        set(ASCEND_CANN_PACKAGE_PATH "${HYBM_COPY_EXTEND_ASCEND_HOME}")
+        set(RUN_MODE "npu" CACHE STRING "cpu/sim/npu")
+        set(SOC_VERSION "Ascend910B3" CACHE STRING "system on chip type")
+        include("${HYBM_COPY_EXTEND_ASCENDC_CMAKE}")
+
+        ascendc_library(hybm_copy_extend_shared SHARED
+                ${PROJECT_HYBM_SRC_BASE}/csrc/copy_extend/hybm_copy_kernel.cpp)
+        set_target_properties(hybm_copy_extend_shared PROPERTIES
+            OUTPUT_NAME "mf_hybm_copy_extend"
+            BUILD_RPATH "\$ORIGIN"
+            INSTALL_RPATH "\$ORIGIN"
+            INSTALL_RPATH_USE_LINK_PATH TRUE
+        )
+
+        set(HYBM_COPY_EXTEND_INCLUDE_DIRS
+                ${PROJECT_HYBM_SRC_BASE}/csrc/copy_extend
+                ${HYBM_COPY_EXTEND_ASCEND_HOME}/include
+                ${HYBM_COPY_EXTEND_ASCEND_HOME}/include/aclnn
+                ${HYBM_COPY_EXTEND_ASCEND_HOME}/asc/include)
+        ascendc_include_directories(hybm_copy_extend_shared PRIVATE ${HYBM_COPY_EXTEND_INCLUDE_DIRS})
+    else ()
+        message(WARNING
+                "BUILD_HYBM_COPY_EXTEND is ON, but AscendC cmake was not found under "
+                "ASCEND_HOME_PATH='${HYBM_COPY_EXTEND_ASCEND_HOME}'. "
+                "Skip building libmf_hybm_copy_extend.so.")
+    endif ()
+endif ()
+
 ## install header files
 file(GLOB HEADER_FILES ${PROJECT_HYBM_SRC_BASE}/include/*.h)
 install(
@@ -77,3 +127,11 @@ install(
         DESTINATION ${TARGET_INSTALL_DIR}/hybm/lib64
         PERMISSIONS OWNER_READ OWNER_WRITE GROUP_READ WORLD_READ
 )
+
+if (TARGET hybm_copy_extend_shared)
+    install(
+            TARGETS hybm_copy_extend_shared
+            DESTINATION ${TARGET_INSTALL_DIR}/hybm/lib64
+            PERMISSIONS OWNER_READ OWNER_WRITE GROUP_READ WORLD_READ
+    )
+endif ()
