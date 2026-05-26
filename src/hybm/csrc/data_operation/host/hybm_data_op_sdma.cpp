@@ -40,11 +40,30 @@ bool IsDataCopyEnabled()
 {
     const char *value = std::getenv("MF_ENABLE_DATA_COPY");
     if (value == nullptr) {
+        value = std::getenv("MMC_ENABLE_DATA_COPY");
+    }
+    if (value == nullptr) {
         return true;
     }
 
     return !(std::string(value) == "0" || std::string(value) == "false" || std::string(value) == "FALSE" ||
              std::string(value) == "off" || std::string(value) == "OFF");
+}
+
+uint64_t GetDataCopySize(uint64_t realSize)
+{
+    const char *value = std::getenv("MF_DATA_COPY_DUMMY_SIZE");
+    if (value == nullptr) {
+        return realSize;
+    }
+
+    char *end = nullptr;
+    auto dummySize = std::strtoull(value, &end, 10);
+    if (end == value || dummySize == 0) {
+        return realSize;
+    }
+
+    return std::min<uint64_t>(realSize, dummySize);
 }
 } // namespace
 
@@ -204,7 +223,8 @@ Result HostDataOpSDMA::CopyLH2GD(void *gvaAddr, const void *hostAddr, size_t cou
     }
 
     if (IsDataCopyEnabled()) {
-        ret = DlAclApi::AclrtMemcpy(copyDevice, count, hostAddr, count, ACL_MEMCPY_HOST_TO_DEVICE);
+        auto copySize = static_cast<size_t>(GetDataCopySize(count));
+        ret = DlAclApi::AclrtMemcpy(copyDevice, count, hostAddr, copySize, ACL_MEMCPY_HOST_TO_DEVICE);
         if (ret != 0) {
             BM_LOG_ERROR("copy host data to temp copy memory on local device failed: " << ret);
             DlAclApi::AclrtFree(copyDevice);
@@ -238,7 +258,8 @@ Result HostDataOpSDMA::CopyGD2LH(void *hostAddr, const void *gvaAddr, size_t cou
     }
 
     if (IsDataCopyEnabled()) {
-        ret = DlAclApi::AclrtMemcpy(hostAddr, count, copyDevice, count, ACL_MEMCPY_DEVICE_TO_HOST);
+        auto copySize = static_cast<size_t>(GetDataCopySize(count));
+        ret = DlAclApi::AclrtMemcpy(hostAddr, count, copyDevice, copySize, ACL_MEMCPY_DEVICE_TO_HOST);
         if (ret != 0) {
             BM_LOG_ERROR("copy data on temp DEVICE to GVA failed: " << ret);
             DlAclApi::AclrtFree(copyDevice);
@@ -372,7 +393,8 @@ Result HostDataOpSDMA::CopyLH2GH(void *destVA, const void *srcVA, uint64_t lengt
     }
 
     if (IsDataCopyEnabled()) {
-        ret = DlAclApi::AclrtMemcpy(copyDevice, length, srcVA, length, ACL_MEMCPY_HOST_TO_DEVICE);
+        auto copySize = GetDataCopySize(length);
+        ret = DlAclApi::AclrtMemcpy(copyDevice, length, srcVA, copySize, ACL_MEMCPY_HOST_TO_DEVICE);
         if (ret != 0) {
             BM_LOG_ERROR("copy host data to temp copy memory on local device failed: " << ret);
             DlAclApi::AclrtFree(copyDevice);
@@ -407,7 +429,8 @@ Result HostDataOpSDMA::CopyGH2LH(void *destVA, const void *srcVA, uint64_t lengt
     }
 
     if (IsDataCopyEnabled()) {
-        ret = DlAclApi::AclrtMemcpy(destVA, length, copyDevice, length, ACL_MEMCPY_DEVICE_TO_HOST);
+        auto copySize = GetDataCopySize(length);
+        ret = DlAclApi::AclrtMemcpy(destVA, length, copyDevice, copySize, ACL_MEMCPY_DEVICE_TO_HOST);
         if (ret != 0) {
             BM_LOG_ERROR("copy host data to temp copy memory on local device failed: " << ret);
             DlAclApi::AclrtFree(copyDevice);
@@ -538,7 +561,8 @@ Result HostDataOpSDMA::CopyG2G(void *destVA, const void *srcVA, size_t count, ui
         if (!IsDataCopyEnabled()) {
             return BM_OK;
         }
-        auto ret = DlHybmExtendApi::HybmCopyExtend(srcVA, destVA, count, HYBM_EXTEND_CONCURRENT, st);
+        auto copySize = GetDataCopySize(count);
+        auto ret = DlHybmExtendApi::HybmCopyExtend(srcVA, destVA, copySize, HYBM_EXTEND_CONCURRENT, st);
         BM_ASSERT_RETURN(ret == BM_OK, ret);
         ret = DlAclApi::AclrtSynchronizeStream(st);
         BM_VALIDATE_RETURN(ret == BM_OK, "AclrtSynchronizeStream failed:" << ret, BM_ERROR);
@@ -546,7 +570,7 @@ Result HostDataOpSDMA::CopyG2G(void *destVA, const void *srcVA, size_t count, ui
     }
 
     StreamTask task{};
-    InitG2GStreamTask(task, destVA, srcVA, count);
+    InitG2GStreamTask(task, destVA, srcVA, GetDataCopySize(count));
     auto hStream = HybmStreamManager::GetThreadHybmStream(HybmGetInitedLogicDeviceId());
     BM_ASSERT_RETURN(hStream != nullptr, BM_ERROR);
     if (!IsDataCopyEnabled()) {
@@ -569,13 +593,14 @@ Result HostDataOpSDMA::CopyG2GAsync(void *destVA, const void *srcVA, size_t coun
         if (!IsDataCopyEnabled()) {
             return BM_OK;
         }
+        auto copySize = GetDataCopySize(count);
         if (flags & COPY_EXTEND_FLAG) {
-            return DlHybmExtendApi::HybmCopyExtend(srcVA, destVA, count, HYBM_EXTEND_CONCURRENT, stream);
+            return DlHybmExtendApi::HybmCopyExtend(srcVA, destVA, copySize, HYBM_EXTEND_CONCURRENT, stream);
         }
-        return DlAclApi::RtMemcpyAsync(destVA, count, srcVA, count, RT_MEMCPY_DEVICE_TO_DEVICE, stream);
+        return DlAclApi::RtMemcpyAsync(destVA, count, srcVA, copySize, RT_MEMCPY_DEVICE_TO_DEVICE, stream);
     }
     StreamTask task{};
-    InitG2GStreamTask(task, destVA, srcVA, count);
+    InitG2GStreamTask(task, destVA, srcVA, GetDataCopySize(count));
     auto hStream = HybmStreamManager::GetThreadHybmStream(HybmGetInitedLogicDeviceId());
     BM_ASSERT_RETURN(hStream != nullptr, BM_ERROR);
     if (!IsDataCopyEnabled()) {
@@ -630,7 +655,7 @@ Result HostDataOpSDMA::BatchCopyExtend(hybm_batch_copy_params &params, void *str
         for (uint32_t i = 0, j = 0; i < nowBatchSize; i++) {
             tmpParam[j++] = reinterpret_cast<uint64_t>(params.sources[nowBatchStart + i]);
             tmpParam[j++] = reinterpret_cast<uint64_t>(params.destinations[nowBatchStart + i]);
-            tmpParam[j++] = params.dataSizes[nowBatchStart + i];
+            tmpParam[j++] = GetDataCopySize(params.dataSizes[nowBatchStart + i]);
         }
 
         void *remoteAddr = reinterpret_cast<void *>(reinterpret_cast<uint64_t>(tmpParam) + paramOffset_);
@@ -686,7 +711,7 @@ Result HostDataOpSDMA::QuantCopy(hybm_quant_copy_params &params) noexcept
                         HYBM_GLOBAL_DEVICE_TO_LOCAL_DEVICE);
             tmpParam[j++] = reinterpret_cast<uint64_t>(params.sources[nowBatchStart + i]);
             tmpParam[j++] = reinterpret_cast<uint64_t>(params.destinations[nowBatchStart + i]);
-            tmpParam[j++] = params.dataSizes[nowBatchStart + i];
+            tmpParam[j++] = GetDataCopySize(params.dataSizes[nowBatchStart + i]);
             tmpParam[j++] = reinterpret_cast<uint64_t>(params.scale[nowBatchStart + i]);
             tmpParam[j++] = reinterpret_cast<uint64_t>(params.offset[nowBatchStart + i]);
         }
