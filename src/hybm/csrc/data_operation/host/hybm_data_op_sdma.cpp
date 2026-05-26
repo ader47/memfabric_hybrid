@@ -11,6 +11,9 @@
 */
 #include "hybm_data_op_sdma.h"
 
+#include <cstdlib>
+#include <string>
+
 #include "hybm_logger.h"
 #include "dl_acl_api.h"
 #include "dl_hal_api.h"
@@ -31,6 +34,19 @@ constexpr uint64_t HYBM_PARAM_SPACE_META_OFFSET = HYBM_SINGLE_PARAM_SIZE * HYBM_
 constexpr uint64_t HYBM_PARAM_META_IDX_BASE = 8; // 8 * 8B = 64B, aicore cacheline is 64B
 constexpr uint32_t HYBM_EXTEND_CONCURRENT = 32;
 constexpr uint32_t HYBM_QUANT_COPY_PARAM_SIZE = 40; // 5 param: src, dest, len, scale, offset
+
+namespace {
+bool IsDataCopyEnabled()
+{
+    const char *value = std::getenv("MF_ENABLE_DATA_COPY");
+    if (value == nullptr) {
+        return true;
+    }
+
+    return !(std::string(value) == "0" || std::string(value) == "false" || std::string(value) == "FALSE" ||
+             std::string(value) == "off" || std::string(value) == "OFF");
+}
+} // namespace
 
 HostDataOpSDMA::HostDataOpSDMA() noexcept {};
 
@@ -187,11 +203,13 @@ Result HostDataOpSDMA::CopyLH2GD(void *gvaAddr, const void *hostAddr, size_t cou
         return BM_DL_FUNCTION_FAILED;
     }
 
-    ret = DlAclApi::AclrtMemcpy(copyDevice, count, hostAddr, count, ACL_MEMCPY_HOST_TO_DEVICE);
-    if (ret != 0) {
-        BM_LOG_ERROR("copy host data to temp copy memory on local device failed: " << ret);
-        DlAclApi::AclrtFree(copyDevice);
-        return BM_DL_FUNCTION_FAILED;
+    if (IsDataCopyEnabled()) {
+        ret = DlAclApi::AclrtMemcpy(copyDevice, count, hostAddr, count, ACL_MEMCPY_HOST_TO_DEVICE);
+        if (ret != 0) {
+            BM_LOG_ERROR("copy host data to temp copy memory on local device failed: " << ret);
+            DlAclApi::AclrtFree(copyDevice);
+            return BM_DL_FUNCTION_FAILED;
+        }
     }
 
     auto result = CopyG2G(gvaAddr, copyDevice, count, 0, nullptr);
@@ -219,11 +237,13 @@ Result HostDataOpSDMA::CopyGD2LH(void *hostAddr, const void *gvaAddr, size_t cou
         return result;
     }
 
-    ret = DlAclApi::AclrtMemcpy(hostAddr, count, copyDevice, count, ACL_MEMCPY_DEVICE_TO_HOST);
-    if (ret != 0) {
-        BM_LOG_ERROR("copy data on temp DEVICE to GVA failed: " << ret);
-        DlAclApi::AclrtFree(copyDevice);
-        return BM_DL_FUNCTION_FAILED;
+    if (IsDataCopyEnabled()) {
+        ret = DlAclApi::AclrtMemcpy(hostAddr, count, copyDevice, count, ACL_MEMCPY_DEVICE_TO_HOST);
+        if (ret != 0) {
+            BM_LOG_ERROR("copy data on temp DEVICE to GVA failed: " << ret);
+            DlAclApi::AclrtFree(copyDevice);
+            return BM_DL_FUNCTION_FAILED;
+        }
     }
 
     DlAclApi::AclrtFree(copyDevice);
@@ -351,11 +371,13 @@ Result HostDataOpSDMA::CopyLH2GH(void *destVA, const void *srcVA, uint64_t lengt
         return BM_DL_FUNCTION_FAILED;
     }
 
-    ret = DlAclApi::AclrtMemcpy(copyDevice, length, srcVA, length, ACL_MEMCPY_HOST_TO_DEVICE);
-    if (ret != 0) {
-        BM_LOG_ERROR("copy host data to temp copy memory on local device failed: " << ret);
-        DlAclApi::AclrtFree(copyDevice);
-        return BM_DL_FUNCTION_FAILED;
+    if (IsDataCopyEnabled()) {
+        ret = DlAclApi::AclrtMemcpy(copyDevice, length, srcVA, length, ACL_MEMCPY_HOST_TO_DEVICE);
+        if (ret != 0) {
+            BM_LOG_ERROR("copy host data to temp copy memory on local device failed: " << ret);
+            DlAclApi::AclrtFree(copyDevice);
+            return BM_DL_FUNCTION_FAILED;
+        }
     }
 
     auto result = CopyG2G(destVA, copyDevice, length, 0, nullptr);
@@ -384,11 +406,13 @@ Result HostDataOpSDMA::CopyGH2LH(void *destVA, const void *srcVA, uint64_t lengt
         return result;
     }
 
-    ret = DlAclApi::AclrtMemcpy(destVA, length, copyDevice, length, ACL_MEMCPY_DEVICE_TO_HOST);
-    if (ret != 0) {
-        BM_LOG_ERROR("copy host data to temp copy memory on local device failed: " << ret);
-        DlAclApi::AclrtFree(copyDevice);
-        return BM_DL_FUNCTION_FAILED;
+    if (IsDataCopyEnabled()) {
+        ret = DlAclApi::AclrtMemcpy(destVA, length, copyDevice, length, ACL_MEMCPY_DEVICE_TO_HOST);
+        if (ret != 0) {
+            BM_LOG_ERROR("copy host data to temp copy memory on local device failed: " << ret);
+            DlAclApi::AclrtFree(copyDevice);
+            return BM_DL_FUNCTION_FAILED;
+        }
     }
 
     DlAclApi::AclrtFree(copyDevice);
@@ -511,6 +535,9 @@ Result HostDataOpSDMA::CopyG2G(void *destVA, const void *srcVA, size_t count, ui
 {
     if (flags & COPY_EXTEND_FLAG) {
         void *st = (stream != nullptr) ? stream : HybmStreamManager::GetThreadAclStream();
+        if (!IsDataCopyEnabled()) {
+            return BM_OK;
+        }
         auto ret = DlHybmExtendApi::HybmCopyExtend(srcVA, destVA, count, HYBM_EXTEND_CONCURRENT, st);
         BM_ASSERT_RETURN(ret == BM_OK, ret);
         ret = DlAclApi::AclrtSynchronizeStream(st);
@@ -522,6 +549,9 @@ Result HostDataOpSDMA::CopyG2G(void *destVA, const void *srcVA, size_t count, ui
     InitG2GStreamTask(task, destVA, srcVA, count);
     auto hStream = HybmStreamManager::GetThreadHybmStream(HybmGetInitedLogicDeviceId());
     BM_ASSERT_RETURN(hStream != nullptr, BM_ERROR);
+    if (!IsDataCopyEnabled()) {
+        return BM_OK;
+    }
 
     auto ret = hStream->SubmitTasks(task);
     BM_ASSERT_RETURN(ret == 0, BM_ERROR);
@@ -536,6 +566,9 @@ Result HostDataOpSDMA::CopyG2GAsync(void *destVA, const void *srcVA, size_t coun
 {
     BM_LOG_DEBUG("src:" << srcVA << " destVA:" << destVA << " length:" << count << " st:" << stream);
     if ((flags & ASYNC_COPY_FLAG) && stream != nullptr) { // submit task into acl stream
+        if (!IsDataCopyEnabled()) {
+            return BM_OK;
+        }
         if (flags & COPY_EXTEND_FLAG) {
             return DlHybmExtendApi::HybmCopyExtend(srcVA, destVA, count, HYBM_EXTEND_CONCURRENT, stream);
         }
@@ -545,6 +578,9 @@ Result HostDataOpSDMA::CopyG2GAsync(void *destVA, const void *srcVA, size_t coun
     InitG2GStreamTask(task, destVA, srcVA, count);
     auto hStream = HybmStreamManager::GetThreadHybmStream(HybmGetInitedLogicDeviceId());
     BM_ASSERT_RETURN(hStream != nullptr, BM_ERROR);
+    if (!IsDataCopyEnabled()) {
+        return BM_OK;
+    }
 
     TP_TRACE_BEGIN(TP_HYBM_SDMA_SUBMIT_G2G_TASK);
     auto ret = hStream->SubmitTasks(task);
@@ -598,6 +634,10 @@ Result HostDataOpSDMA::BatchCopyExtend(hybm_batch_copy_params &params, void *str
         }
 
         void *remoteAddr = reinterpret_cast<void *>(reinterpret_cast<uint64_t>(tmpParam) + paramOffset_);
+        if (!IsDataCopyEnabled()) {
+            *reinterpret_cast<uint64_t *>(maskPtr) = HYBM_EXTEND_CONCURRENT;
+            continue;
+        }
         auto ret = DlHybmExtendApi::HybmBatchCopyExtend(remoteAddr, nowBatchSize,
             reinterpret_cast<void *>(reinterpret_cast<uint64_t>(maskPtr) + paramOffset_), HYBM_EXTEND_CONCURRENT, st);
         if (ret != 0) {
@@ -605,6 +645,10 @@ Result HostDataOpSDMA::BatchCopyExtend(hybm_batch_copy_params &params, void *str
             BM_LOG_ERROR("call HybmBatchCopyExtend failed, ret:" << ret);
             return BM_ERROR;
         }
+    }
+
+    if (!IsDataCopyEnabled()) {
+        return BM_OK;
     }
 
     if (!(flags & ASYNC_COPY_FLAG)) {
@@ -648,6 +692,10 @@ Result HostDataOpSDMA::QuantCopy(hybm_quant_copy_params &params) noexcept
         }
 
         void *remoteAddr = reinterpret_cast<void *>(reinterpret_cast<uint64_t>(tmpParam) + paramOffset_);
+        if (!IsDataCopyEnabled()) {
+            *reinterpret_cast<uint64_t *>(maskPtr) = HYBM_EXTEND_CONCURRENT;
+            continue;
+        }
         auto ret = DlHybmExtendApi::HybmBatchCopyQuant(remoteAddr, nowBatchSize, params.unitNum, params.inputType,
             reinterpret_cast<void *>(reinterpret_cast<uint64_t>(maskPtr) + paramOffset_), HYBM_EXTEND_CONCURRENT, st);
         if (ret != 0) {
@@ -655,6 +703,10 @@ Result HostDataOpSDMA::QuantCopy(hybm_quant_copy_params &params) noexcept
             BM_LOG_ERROR("call HybmBatchCopyQuant failed, ret:" << ret);
             return BM_ERROR;
         }
+    }
+
+    if (!IsDataCopyEnabled()) {
+        return BM_OK;
     }
 
     if (!(params.flags & ASYNC_COPY_FLAG)) {
@@ -703,6 +755,10 @@ Result HostDataOpSDMA::BatchCopyG2G(hybm_batch_copy_params &params, const ExtOpt
         len = count;
     }
     asyncFunc();
+
+    if (!IsDataCopyEnabled()) {
+        return ret;
+    }
 
     if (!(options.flags & ASYNC_COPY_FLAG)) {
         TP_TRACE_BEGIN(TP_HYBM_SDMA_WAIT);
