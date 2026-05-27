@@ -11,6 +11,7 @@
 */
 #include "hybm_data_op_sdma.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <string>
 
@@ -64,6 +65,31 @@ uint64_t GetDataCopySize(uint64_t realSize)
     }
 
     return std::min<uint64_t>(realSize, dummySize);
+}
+
+uint64_t GetDataCopyChunkSize(uint64_t realSize)
+{
+    const char *value = std::getenv("MF_DATA_COPY_CHUNK_SIZE");
+    if (value == nullptr) {
+        return realSize;
+    }
+
+    char *end = nullptr;
+    auto chunkSize = std::strtoull(value, &end, 10);
+    if (end == value || chunkSize == 0) {
+        return realSize;
+    }
+    return std::min<uint64_t>(realSize, chunkSize);
+}
+
+void *OffsetMutablePtr(void *ptr, uint64_t offset)
+{
+    return reinterpret_cast<void *>(reinterpret_cast<uint64_t>(ptr) + offset);
+}
+
+const void *OffsetConstPtr(const void *ptr, uint64_t offset)
+{
+    return reinterpret_cast<const void *>(reinterpret_cast<uint64_t>(ptr) + offset);
 }
 } // namespace
 
@@ -561,26 +587,37 @@ Result HostDataOpSDMA::CopyG2G(void *destVA, const void *srcVA, size_t count, ui
         if (!IsDataCopyEnabled()) {
             return BM_OK;
         }
-        auto copySize = GetDataCopySize(count);
-        auto ret = DlHybmExtendApi::HybmCopyExtend(srcVA, destVA, copySize, HYBM_EXTEND_CONCURRENT, st);
-        BM_ASSERT_RETURN(ret == BM_OK, ret);
+        Result ret = BM_OK;
+        auto totalSize = GetDataCopySize(count);
+        for (uint64_t offset = 0; offset < totalSize;) {
+            auto chunkSize = GetDataCopyChunkSize(totalSize - offset);
+            ret = DlHybmExtendApi::HybmCopyExtend(OffsetConstPtr(srcVA, offset), OffsetMutablePtr(destVA, offset),
+                                                  chunkSize, HYBM_EXTEND_CONCURRENT, st);
+            BM_ASSERT_RETURN(ret == BM_OK, ret);
+            offset += chunkSize;
+        }
         ret = DlAclApi::AclrtSynchronizeStream(st);
         BM_VALIDATE_RETURN(ret == BM_OK, "AclrtSynchronizeStream failed:" << ret, BM_ERROR);
         return BM_OK;
     }
 
-    StreamTask task{};
-    InitG2GStreamTask(task, destVA, srcVA, GetDataCopySize(count));
     auto hStream = HybmStreamManager::GetThreadHybmStream(HybmGetInitedLogicDeviceId());
     BM_ASSERT_RETURN(hStream != nullptr, BM_ERROR);
     if (!IsDataCopyEnabled()) {
         return BM_OK;
     }
 
-    auto ret = hStream->SubmitTasks(task);
-    BM_ASSERT_RETURN(ret == 0, BM_ERROR);
+    auto totalSize = GetDataCopySize(count);
+    for (uint64_t offset = 0; offset < totalSize;) {
+        auto chunkSize = GetDataCopyChunkSize(totalSize - offset);
+        StreamTask task{};
+        InitG2GStreamTask(task, OffsetMutablePtr(destVA, offset), OffsetConstPtr(srcVA, offset), chunkSize);
+        auto ret = hStream->SubmitTasks(task);
+        BM_ASSERT_RETURN(ret == 0, BM_ERROR);
+        offset += chunkSize;
+    }
 
-    ret = hStream->Synchronize();
+    auto ret = hStream->Synchronize();
     BM_ASSERT_RETURN(ret == 0, BM_ERROR);
     return BM_OK;
 }
@@ -593,24 +630,39 @@ Result HostDataOpSDMA::CopyG2GAsync(void *destVA, const void *srcVA, size_t coun
         if (!IsDataCopyEnabled()) {
             return BM_OK;
         }
-        auto copySize = GetDataCopySize(count);
-        if (flags & COPY_EXTEND_FLAG) {
-            return DlHybmExtendApi::HybmCopyExtend(srcVA, destVA, copySize, HYBM_EXTEND_CONCURRENT, stream);
+        auto totalSize = GetDataCopySize(count);
+        for (uint64_t offset = 0; offset < totalSize;) {
+            auto chunkSize = GetDataCopyChunkSize(totalSize - offset);
+            Result ret = BM_OK;
+            if (flags & COPY_EXTEND_FLAG) {
+                ret = DlHybmExtendApi::HybmCopyExtend(OffsetConstPtr(srcVA, offset), OffsetMutablePtr(destVA, offset),
+                                                      chunkSize, HYBM_EXTEND_CONCURRENT, stream);
+            } else {
+                ret = DlAclApi::RtMemcpyAsync(OffsetMutablePtr(destVA, offset), chunkSize, OffsetConstPtr(srcVA, offset),
+                                              chunkSize, RT_MEMCPY_DEVICE_TO_DEVICE, stream);
+            }
+            BM_ASSERT_RETURN(ret == BM_OK, ret);
+            offset += chunkSize;
         }
-        return DlAclApi::RtMemcpyAsync(destVA, count, srcVA, copySize, RT_MEMCPY_DEVICE_TO_DEVICE, stream);
+        return BM_OK;
     }
-    StreamTask task{};
-    InitG2GStreamTask(task, destVA, srcVA, GetDataCopySize(count));
     auto hStream = HybmStreamManager::GetThreadHybmStream(HybmGetInitedLogicDeviceId());
     BM_ASSERT_RETURN(hStream != nullptr, BM_ERROR);
     if (!IsDataCopyEnabled()) {
         return BM_OK;
     }
 
-    TP_TRACE_BEGIN(TP_HYBM_SDMA_SUBMIT_G2G_TASK);
-    auto ret = hStream->SubmitTasks(task);
-    TP_TRACE_END(TP_HYBM_SDMA_SUBMIT_G2G_TASK, ret);
-    BM_ASSERT_RETURN(ret == 0, BM_ERROR);
+    auto totalSize = GetDataCopySize(count);
+    for (uint64_t offset = 0; offset < totalSize;) {
+        auto chunkSize = GetDataCopyChunkSize(totalSize - offset);
+        StreamTask task{};
+        InitG2GStreamTask(task, OffsetMutablePtr(destVA, offset), OffsetConstPtr(srcVA, offset), chunkSize);
+        TP_TRACE_BEGIN(TP_HYBM_SDMA_SUBMIT_G2G_TASK);
+        auto ret = hStream->SubmitTasks(task);
+        TP_TRACE_END(TP_HYBM_SDMA_SUBMIT_G2G_TASK, ret);
+        BM_ASSERT_RETURN(ret == 0, BM_ERROR);
+        offset += chunkSize;
+    }
     return BM_OK;
 }
 
@@ -637,31 +689,40 @@ Result HostDataOpSDMA::BatchCopyExtend(hybm_batch_copy_params &params, void *str
 {
     BM_VALIDATE_RETURN(paramSpace_ != nullptr, "not support batch extend copy.", BM_ERROR);
     void *st = (stream != nullptr) ? stream : HybmStreamManager::GetThreadAclStream();
-    uint32_t taskNum = (params.batchSize + HYBM_SINGLE_PARAM_NUM - 1) / HYBM_SINGLE_PARAM_NUM;
-    for (uint32_t idx = 0; idx < taskNum; idx++) {
-        uint32_t nowBatchStart = idx * HYBM_SINGLE_PARAM_NUM;
-        uint32_t nowBatchSize = std::min(nowBatchStart + HYBM_SINGLE_PARAM_NUM, params.batchSize) - nowBatchStart;
-        void *maskPtr = nullptr;
+    uint32_t nowBatchSize = 0;
+    void *maskPtr = nullptr;
+    uint64_t *tmpParam = nullptr;
+
+    auto allocParamSpace = [&]() -> Result {
         uint32_t spaceId = TryGetOneParamSpace(&maskPtr);
         if (spaceId >= HYBM_PARAM_SPACE_CAP) {
             auto ret = DlAclApi::AclrtSynchronizeStream(st);
-            BM_VALIDATE_RETURN(ret == BM_OK, "AclrtSynchronizeStream failed:" << ret, BM_ERROR);
+            if (ret != BM_OK) {
+                BM_LOG_ERROR("AclrtSynchronizeStream failed:" << ret);
+                return BM_ERROR;
+            }
             spaceId = TryGetOneParamSpace(&maskPtr);
         }
-        BM_VALIDATE_RETURN(spaceId < HYBM_PARAM_SPACE_CAP, "alloc param space failed!", BM_ERROR);
-
-        auto tmpParam = reinterpret_cast<uint64_t *>(
-            reinterpret_cast<uint64_t>(paramSpace_) + spaceId * HYBM_SINGLE_PARAM_SIZE);
-        for (uint32_t i = 0, j = 0; i < nowBatchSize; i++) {
-            tmpParam[j++] = reinterpret_cast<uint64_t>(params.sources[nowBatchStart + i]);
-            tmpParam[j++] = reinterpret_cast<uint64_t>(params.destinations[nowBatchStart + i]);
-            tmpParam[j++] = GetDataCopySize(params.dataSizes[nowBatchStart + i]);
+        if (spaceId >= HYBM_PARAM_SPACE_CAP) {
+            BM_LOG_ERROR("alloc param space failed!");
+            return BM_ERROR;
         }
+        tmpParam = reinterpret_cast<uint64_t *>(
+            reinterpret_cast<uint64_t>(paramSpace_) + spaceId * HYBM_SINGLE_PARAM_SIZE);
+        return BM_OK;
+    };
 
+    auto submitParamSpace = [&]() -> Result {
+        if (nowBatchSize == 0) {
+            return BM_OK;
+        }
         void *remoteAddr = reinterpret_cast<void *>(reinterpret_cast<uint64_t>(tmpParam) + paramOffset_);
         if (!IsDataCopyEnabled()) {
             *reinterpret_cast<uint64_t *>(maskPtr) = HYBM_EXTEND_CONCURRENT;
-            continue;
+            nowBatchSize = 0;
+            maskPtr = nullptr;
+            tmpParam = nullptr;
+            return BM_OK;
         }
         auto ret = DlHybmExtendApi::HybmBatchCopyExtend(remoteAddr, nowBatchSize,
             reinterpret_cast<void *>(reinterpret_cast<uint64_t>(maskPtr) + paramOffset_), HYBM_EXTEND_CONCURRENT, st);
@@ -670,6 +731,50 @@ Result HostDataOpSDMA::BatchCopyExtend(hybm_batch_copy_params &params, void *str
             BM_LOG_ERROR("call HybmBatchCopyExtend failed, ret:" << ret);
             return BM_ERROR;
         }
+        nowBatchSize = 0;
+        maskPtr = nullptr;
+        tmpParam = nullptr;
+        return BM_OK;
+    };
+
+    auto appendParam = [&](const void *src, void *dest, uint64_t len) -> Result {
+        if (nowBatchSize == 0) {
+            auto ret = allocParamSpace();
+            if (ret != BM_OK) {
+                return ret;
+            }
+        }
+
+        uint32_t j = nowBatchSize * 3;
+        tmpParam[j++] = reinterpret_cast<uint64_t>(src);
+        tmpParam[j++] = reinterpret_cast<uint64_t>(dest);
+        tmpParam[j++] = len;
+        nowBatchSize++;
+
+        if (nowBatchSize == HYBM_SINGLE_PARAM_NUM) {
+            return submitParamSpace();
+        }
+        return BM_OK;
+    };
+
+    for (uint32_t i = 0; i < params.batchSize; i++) {
+        auto src = reinterpret_cast<uint64_t>(params.sources[i]);
+        auto dest = reinterpret_cast<uint64_t>(params.destinations[i]);
+        auto totalSize = GetDataCopySize(params.dataSizes[i]);
+        for (uint64_t offset = 0; offset < totalSize;) {
+            auto chunkSize = GetDataCopyChunkSize(totalSize - offset);
+            auto ret = appendParam(reinterpret_cast<const void *>(src + offset),
+                                   reinterpret_cast<void *>(dest + offset), chunkSize);
+            if (ret != BM_OK) {
+                return ret;
+            }
+            offset += chunkSize;
+        }
+    }
+
+    auto ret = submitParamSpace();
+    if (ret != BM_OK) {
+        return ret;
     }
 
     if (!IsDataCopyEnabled()) {
