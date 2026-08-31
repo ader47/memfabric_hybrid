@@ -27,11 +27,22 @@ uint8_t HybmVaManager::directionLut[BIT_LUT_SIZE];
 
 void HybmVaManager::InitDirectionLut()
 {
+    // A locally allocated GVA is classified as both local and global. Prefer a
+    // direction that keeps one endpoint local before falling back to G2G;
+    // otherwise a pull into a local GVA can be misclassified as G2G.
+    static constexpr hybm_data_copy_direction DIRECTION_PRIORITY[] = {
+        HYBM_LOCAL_HOST_TO_GLOBAL_HOST,     HYBM_LOCAL_HOST_TO_GLOBAL_DEVICE,   HYBM_LOCAL_DEVICE_TO_GLOBAL_HOST,
+        HYBM_LOCAL_DEVICE_TO_GLOBAL_DEVICE, HYBM_GLOBAL_HOST_TO_LOCAL_HOST,     HYBM_GLOBAL_HOST_TO_LOCAL_DEVICE,
+        HYBM_GLOBAL_DEVICE_TO_LOCAL_HOST,   HYBM_GLOBAL_DEVICE_TO_LOCAL_DEVICE, HYBM_GLOBAL_HOST_TO_GLOBAL_HOST,
+        HYBM_GLOBAL_HOST_TO_GLOBAL_DEVICE,  HYBM_GLOBAL_DEVICE_TO_GLOBAL_HOST,  HYBM_GLOBAL_DEVICE_TO_GLOBAL_DEVICE,
+    };
+
     for (int except = 0; except < BIT_LUT_SIZE; except++) {
         uint8_t d = HYBM_DATA_COPY_DIRECTION_BUTT;
-        for (int i = 0; i < HYBM_DATA_COPY_DIRECTION_BUTT - 1; i++) {
+        for (const auto direction : DIRECTION_PRIORITY) {
+            const auto i = static_cast<uint8_t>(direction);
             if ((dirMask[i] & except) == dirMask[i]) {
-                d = static_cast<uint8_t>(i);
+                d = i;
                 break;
             }
         }

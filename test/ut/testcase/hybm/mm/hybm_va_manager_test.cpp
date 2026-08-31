@@ -1116,17 +1116,27 @@ TEST_F(HybmVaManagerTest, DirectionLut_GlobalToLocal_ReturnsGH2LH)
     EXPECT_EQ(dir, HYBM_GLOBAL_HOST_TO_LOCAL_HOST);
 }
 
-// 测试78: directionLut 双位 → 取最小方向值
-TEST_F(HybmVaManagerTest, DirectionLut_DualBits_ReturnsFirstMatch)
+// 测试78: directionLut 双位 → 优先本地源方向
+TEST_F(HybmVaManagerTest, DirectionLut_DualBits_PrefersLocalSource)
 {
     HybmVaManager::InitDirectionLut();
     uint8_t dual = HybmVaManager::BIT_LOCAL_HOST | HybmVaManager::BIT_GLOBAL_HOST;
     uint8_t except = dual | (dual << 4);
     uint8_t dir = HybmVaManager::directionLut[except];
-    EXPECT_EQ(dir, HYBM_LOCAL_HOST_TO_GLOBAL_HOST); // H2GH(0) 最小
+    EXPECT_EQ(dir, HYBM_LOCAL_HOST_TO_GLOBAL_HOST);
 }
 
-// 测试79: directionLut 无效组合 → BUTT
+// 测试79: 远端 Device 拉取到本地/全局双属性 Host GVA → GD2LH
+TEST_F(HybmVaManagerTest, DirectionLut_GlobalDeviceToDualHost_PrefersLocalDestination)
+{
+    HybmVaManager::InitDirectionLut();
+    uint8_t dualHost = HybmVaManager::BIT_LOCAL_HOST | HybmVaManager::BIT_GLOBAL_HOST;
+    uint8_t except = HybmVaManager::BIT_GLOBAL_DEVICE | (dualHost << 4);
+    uint8_t dir = HybmVaManager::directionLut[except];
+    EXPECT_EQ(dir, HYBM_GLOBAL_DEVICE_TO_LOCAL_HOST);
+}
+
+// 测试80: directionLut 无效组合 → BUTT
 TEST_F(HybmVaManagerTest, DirectionLut_Invalid_ReturnsBUTT)
 {
     HybmVaManager::InitDirectionLut();
@@ -1135,7 +1145,7 @@ TEST_F(HybmVaManagerTest, DirectionLut_Invalid_ReturnsBUTT)
     EXPECT_GE(dir, HYBM_DATA_COPY_DIRECTION_AUTO);
 }
 
-// 测试80: directionLut Device→Host 方向
+// 测试81: directionLut Device→Host 方向
 TEST_F(HybmVaManagerTest, DirectionLut_LocalDeviceToGlobalHost_ReturnsD2GH)
 {
     HybmVaManager::InitDirectionLut();
