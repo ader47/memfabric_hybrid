@@ -336,6 +336,8 @@ private:
 
     ~HybmVaManager() = default;
 
+    uint8_t ClassifyLocalAddressMask(uint64_t va) const;
+
     std::pair<bool, AllocatedGvaInfo> CheckOverlap(uint64_t va, uint64_t size, uint32_t type);
 
     uint64_t AllocReserveLvaInner(uint32_t localRankId, uint64_t size, uint32_t type);

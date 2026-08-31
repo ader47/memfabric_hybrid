@@ -271,9 +271,13 @@ Result HybmVaManager::GetLocalMemoryType(uint64_t va, hybm_mem_type &memType) co
 uint8_t HybmVaManager::ClassifyAddressMask(const uint64_t va)
 {
     auto r = QueryAddr(va);
-    // 已 import → 单 GLOBAL
+    const uint8_t localMask = ClassifyLocalAddressMask(va);
+    // An imported GVA may also be registered as a process-local HVA/DVA by a
+    // different entity. Preserve both properties so AUTO can select a local
+    // endpoint direction.
     if (r.inAllocGva && r.importedRankId != INVALID_RANK_ID) {
-        return (r.memType == HYBM_MEM_TYPE_DEVICE) ? BIT_GLOBAL_DEVICE : BIT_GLOBAL_HOST;
+        const uint8_t globalMask = (r.memType == HYBM_MEM_TYPE_DEVICE) ? BIT_GLOBAL_DEVICE : BIT_GLOBAL_HOST;
+        return globalMask | localMask;
     }
     // reservedMap_ → GVA，已在 allocatedMap_ 中才设有效位
     {
@@ -296,12 +300,35 @@ uint8_t HybmVaManager::ClassifyAddressMask(const uint64_t va)
         }
     }
 
+    if (localMask != 0) {
+        return localMask;
+    }
+
     hybm_mem_type memType;
     auto ret = GetLocalMemoryType(va, memType);
     if (ret != BM_OK) {
         return 0; // 无效
     }
     return (memType == HYBM_MEM_TYPE_DEVICE) ? BIT_LOCAL_DEVICE : BIT_LOCAL_HOST;
+}
+
+uint8_t HybmVaManager::ClassifyLocalAddressMask(const uint64_t va) const
+{
+    std::shared_lock<std::shared_mutex> lock(mutex_);
+    for (const uint32_t type : {HVM_HVA, HVM_DVA}) {
+        const auto &allocations = allocatedMap_[type];
+        if (allocations.empty()) {
+            continue;
+        }
+        auto it = allocations.upper_bound(va);
+        if (it != allocations.begin()) {
+            --it;
+        }
+        if (it->second.Contains(va, type)) {
+            return (it->second.base.memType == HYBM_MEM_TYPE_DEVICE) ? BIT_LOCAL_DEVICE : BIT_LOCAL_HOST;
+        }
+    }
+    return 0;
 }
 
 hybm_data_copy_direction HybmVaManager::InferCopyDirection(uint64_t srcVa, uint64_t dstVa)

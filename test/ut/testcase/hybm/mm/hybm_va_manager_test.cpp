@@ -1087,6 +1087,17 @@ TEST_F(HybmVaManagerTest, ClassifyAddressMask_RemoteImported_ReturnsGlobal)
     EXPECT_EQ(mask, HybmVaManager::BIT_GLOBAL_HOST);
 }
 
+// 已导入 GVA 同时被本地 Transfer entity 注册为 HVA → LOCAL|GLOBAL 双位
+TEST_F(HybmVaManagerTest, ClassifyAddressMask_ImportedGvaRegisteredLocally_ReturnsBoth)
+{
+    uint64_t gva = TEST_GVA_BASE_HOST;
+    manager.AddVaInfoFromExternal({gva, 0, 0, TEST_SIZE_ONE_MB, HYBM_MEM_TYPE_HOST}, TEST_RANK_ONE, TEST_RANK_ZERO);
+    manager.AddVaInfo({0, 0, gva, TEST_SIZE_ONE_MB, HYBM_MEM_TYPE_HOST}, TEST_RANK_ONE);
+
+    uint8_t mask = manager.ClassifyAddressMask(gva);
+    EXPECT_EQ(mask, HybmVaManager::BIT_LOCAL_HOST | HybmVaManager::BIT_GLOBAL_HOST);
+}
+
 // ======================== LUT 方向推断测试 ========================
 
 // 测试75: directionLut LH→GH → H2GH
@@ -1134,6 +1145,23 @@ TEST_F(HybmVaManagerTest, DirectionLut_GlobalDeviceToDualHost_PrefersLocalDestin
     uint8_t except = HybmVaManager::BIT_GLOBAL_DEVICE | (dualHost << 4);
     uint8_t dir = HybmVaManager::directionLut[except];
     EXPECT_EQ(dir, HYBM_GLOBAL_DEVICE_TO_LOCAL_HOST);
+}
+
+// 远端 Device → 已导入且本地注册的 Host GVA，完整 AUTO 路径选择 GD2LH
+TEST_F(HybmVaManagerTest, AutoDirection_GlobalDeviceToLocallyRegisteredImportedHost_ReturnsGD2LH)
+{
+    HybmVaManager::InitDirectionLut();
+    uint64_t srcGva = TEST_GVA_BASE_DEVICE;
+    uint64_t dstGva = TEST_GVA_BASE_HOST;
+    manager.AddVaInfoFromExternal({srcGva, 0, 0, TEST_SIZE_ONE_MB, HYBM_MEM_TYPE_DEVICE}, TEST_RANK_ONE,
+                                  TEST_RANK_ZERO);
+    manager.AddVaInfoFromExternal({dstGva, 0, 0, TEST_SIZE_ONE_MB, HYBM_MEM_TYPE_HOST}, TEST_RANK_ONE, TEST_RANK_ZERO);
+    manager.AddVaInfo({0, 0, dstGva, TEST_SIZE_ONE_MB, HYBM_MEM_TYPE_HOST}, TEST_RANK_ONE);
+
+    uint8_t srcMask = manager.ClassifyAddressMask(srcGva);
+    uint8_t dstMask = manager.ClassifyAddressMask(dstGva);
+    uint8_t except = srcMask | (dstMask << 4);
+    EXPECT_EQ(HybmVaManager::directionLut[except], HYBM_GLOBAL_DEVICE_TO_LOCAL_HOST);
 }
 
 // 测试80: directionLut 无效组合 → BUTT
